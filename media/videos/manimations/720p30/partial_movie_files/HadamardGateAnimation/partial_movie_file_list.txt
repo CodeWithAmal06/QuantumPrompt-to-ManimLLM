@@ -1,0 +1,9 @@
+# This file is used internally by FFMPEG.
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/3299980587_392062586_1492934797.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_2779468652_3581860873.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_2840115676_2535559682.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_4034757234_593621678.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_2007710906_2454771877.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_548731573_2942603581.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_2781014901_1601162501.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project'26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateAnimation/1708163581_2230675760_4243570995.mp4'
