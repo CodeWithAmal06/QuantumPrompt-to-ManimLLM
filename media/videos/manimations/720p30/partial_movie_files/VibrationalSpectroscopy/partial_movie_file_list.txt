@@ -1,0 +1,10 @@
+# This file is used internally by FFMPEG.
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/1987512680_2684759985_223132457.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_1772078831_2413861189.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_3612816720_193388324.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_108155937_3137979868.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_2051600501_2156136531.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_548632049_3188126665.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_2449416990_410890877.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_355181864_877457408.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/VibrationalSpectroscopy/2538612922_2872842549_181295144.mp4'

@@ -1,0 +1,6 @@
+# This file is used internally by FFMPEG.
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateBlochSphere/1154472725_367218711_326487240.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateBlochSphere/4120890992_548731573_3989177766.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateBlochSphere/1750139310_2665571519_2935103103.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateBlochSphere/4120890992_880388667_857356301.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGateBlochSphere/4120890992_2230675760_2184603749.mp4'

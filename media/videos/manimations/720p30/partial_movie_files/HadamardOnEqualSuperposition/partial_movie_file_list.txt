@@ -1,0 +1,7 @@
+# This file is used internally by FFMPEG.
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/1987512680_2295134206_223132457.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/2538612922_2988251520_3187580824.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/2538612922_3415053577_1577981121.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/2538612922_3752466605_227766373.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/2538612922_3316450605_945459913.mp4'
+file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardOnEqualSuperposition/2538612922_2688965532_3685524486.mp4'

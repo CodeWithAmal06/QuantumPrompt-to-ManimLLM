@@ -13,8 +13,9 @@ This version keeps two things from a hand-written first attempt:
     worth catching that the original version didn't check for.
 
 Usage:
-    python validate_manim_dataset.py input.jsonl
-    python validate_manim_dataset.py input.jsonl --timeout 90 --workers 4
+    python validate_manim_dataset.py
+    python validate_manim_dataset.py --timeout 90 --workers 4
+    python validate_manim_dataset.py --input-jsonl /path/to/input.jsonl
 """
 
 import argparse
@@ -185,13 +186,23 @@ def validate_row(index: int, py_dict: dict, timeout: int, workdir: Path) -> dict
 
 def main():
     parser = argparse.ArgumentParser(description="Validate a Manim JSONL dataset by actually rendering each row.")
-    parser.add_argument("input_jsonl")
+    parser.add_argument(
+        "--input-jsonl",
+        default="/content/drive/MyDrive/input.jsonl",
+        help="Path to the JSONL dataset file. Defaults to the Google Drive file at /content/drive/MyDrive/input.jsonl.",
+    )
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--outdir", default=".")
     args = parser.parse_args()
 
     input_path = Path(args.input_jsonl)
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Dataset file not found at {input_path}. "
+            "Make sure the file exists in your Google Drive mount or pass --input-jsonl with a different path."
+        )
+
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
