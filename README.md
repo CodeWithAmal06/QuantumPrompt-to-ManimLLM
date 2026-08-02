@@ -36,6 +36,10 @@ Final MP4 Output
 
 The pipeline is designed to catch mistakes early. When the generated Manim code fails syntax validation or rendering, the failed code and compiler feedback are fed back into the model. The reflection loop then asks the model to repair the scene and retry until the animation renders successfully or the retry budget is exhausted.
 
+## Visual Language Model Review
+
+In addition to code validation, this project integrates a visual language model review step. Once a rendered MP4 is available, a fine-tuned VLM inspects the video and compares it against the original prompt. The VLM can classify the animation as valid or invalid and provide corrective feedback, enabling the reflection loop to fix visual errors, motion direction, final state accuracy, and other scene-level issues.
+
 ## Repository Structure
 
 ```text

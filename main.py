@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import os
 import re
 import shutil
@@ -19,9 +20,17 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import torch
+from qwen_vl_utils import process_vision_info
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
+
+try:
+    from IPython.display import Video, display
+except ImportError:
+    Video = None
+    display = None
 
 console = Console()
 
@@ -29,8 +38,18 @@ CODE_BLOCK_RE = re.compile(r"```python\s+(.*?)\s+```", re.DOTALL | re.IGNORECASE
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
 CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
 DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
+PROMPT_INSTRUCTIONS = (
+    "Generate a runnable Manim scene in Python using Manim v0.20 syntax. "
+    "Start with `from manim import *` or explicit Manim imports, define exactly one Scene subclass, "
+    "and do not call `.render()` at the module level. Use `self.play(Create(...))`, `FadeOut(...)`, "
+    "and avoid deprecated calls like `ShowCreation` and `ShowCreationThenFadeOut`. "
+    "If you need a fade-out effect, use `self.play(FadeOut(mobject))` after `Create(...)`. "
+    "Return only a single ```python ... ``` code block containing the entire script."
+)
 OUTPUT_DIR = Path("output")
 MODEL_CACHE = {"model": None, "tokenizer": None}
+VLM_CACHE = {"model": None, "tokenizer": None, "process_vision_info": None}
+DEFAULT_VLM_MODEL = DEFAULT_MODEL_NAME
 
 
 def show_banner() -> None:
@@ -76,11 +95,7 @@ def serialize_token_inputs(tokens: dict) -> dict:
 
 def generate_manim_code(prompt: str, model_name: str = DEFAULT_MODEL_NAME) -> str:
     model, tokenizer = load_qwen_model(model_name)
-    instructions = (
-        "Generate a runnable Manim scene in Python from the following quantum animation prompt. "
-        "Return only a single ```python ... ``` code block with the full scene definition."
-    )
-    messages = [{"role": "user", "content": f"{instructions}\n\nPrompt:\n{prompt}"}]
+    messages = [{"role": "user", "content": f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt}"}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
     inputs = serialize_token_inputs(inputs)
@@ -89,6 +104,92 @@ def generate_manim_code(prompt: str, model_name: str = DEFAULT_MODEL_NAME) -> st
     generated_tokens = outputs[0][prompt_len:]
     decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return decoded.strip()
+
+
+def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
+    if VLM_CACHE["model"] is not None and VLM_CACHE["tokenizer"] is not None:
+        return VLM_CACHE["model"], VLM_CACHE["tokenizer"]
+
+    try:
+        from unsloth import FastVisionModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: install unsloth and qwen_vl_utils to enable VLM review."
+        ) from exc
+
+    vlm_model, vlm_tokenizer = FastVisionModel.from_pretrained(
+        model_name=model_name,
+        load_in_4bit=True,
+    )
+    FastVisionModel.for_inference(vlm_model)
+    VLM_CACHE["model"] = vlm_model
+    VLM_CACHE["tokenizer"] = vlm_tokenizer
+    VLM_CACHE["process_vision_info"] = process_vision_info
+    return vlm_model, vlm_tokenizer
+
+
+def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -> dict:
+    if not os.path.exists(video_path):
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Video file not found: {video_path}"}
+
+    vlm_model, vlm_tokenizer = load_vlm_model(model_name)
+    process_vision_info_fn = VLM_CACHE["process_vision_info"]
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video",
+                    "video": video_path,
+                    "max_pixels": 360 * 420,
+                    "fps": 1.0,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Analyze this rendered Manim animation for the prompt: '{prompt}'.\n"
+                        "Check for mathematical correctness:\n"
+                        "1. Does the object move/rotate in the correct direction?\n"
+                        "2. Is the final state accurate?\n\n"
+                        "Respond STRICTLY as JSON: {\"valid\": bool, \"feedback\": \"...\"}"
+                    ),
+                },
+            ],
+        }
+    ]
+
+    text = vlm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info_fn(messages)
+    inputs = vlm_tokenizer(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = {
+        key: value.to(next(vlm_model.parameters()).device) if hasattr(value, "to") else value
+        for key, value in inputs.items()
+    }
+
+    generated_ids = vlm_model.generate(**inputs, max_new_tokens=300)
+    output_text = vlm_tokenizer.batch_decode(
+        generated_ids[:, inputs["input_ids"].shape[1]:],
+        skip_special_tokens=True,
+    )[0]
+
+    try:
+        data = json.loads(output_text)
+        if "valid" in data:
+            return {
+                "status": "SUCCESS",
+                "valid": bool(data["valid"]),
+                "feedback": str(data.get("feedback", "")),
+            }
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": "VLM JSON output missing 'valid' key."}
+    except Exception as exc:
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Failed to parse VLM output as JSON: {exc}: {output_text}"}
 
 
 def extract_code(raw_text: str) -> str:
@@ -117,6 +218,17 @@ def check_magic_line_classname(code: str) -> tuple[Optional[str], Optional[str]]
 
     cleaned_lines = [line for line in code.splitlines() if not MAGIC_LINE_RE.match(line)]
     return "\n".join(cleaned_lines).strip(), actual_class_name
+
+
+IMPORT_CHECK_RE = re.compile(r"^(?:from\s+manim\s+import\s+.*|import\s+manim.*)$", re.MULTILINE)
+
+
+def ensure_manim_imports(code: str) -> str:
+    # Always add a broad Manim wildcard import if no `from manim import *` is present.
+    # This prevents NameError for color constants and utility names like CYAN, LEFT, RIGHT, etc.
+    if "from manim import *" in code:
+        return code
+    return "from manim import *\n\n" + code
 
 
 def check_syntax(code: str) -> Optional[str]:
@@ -195,6 +307,8 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
             current_prompt = build_reflection_prompt(prompt, code, class_name_or_error)
             continue
 
+        cleaned_code = ensure_manim_imports(cleaned_code)
+
         syntax_error = check_syntax(cleaned_code)
         if syntax_error:
             console.print(f"[red]Syntax error detected:[/red] {syntax_error}")
@@ -205,13 +319,48 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
         render_result = render_manim_scene(cleaned_code, class_name_or_error, OUTPUT_DIR)
 
         if render_result["ok"] and render_result["media_file"]:
-            console.print("[bold green][✓][/bold green] Animation rendered successfully! Output saved to ./output/.")
+            if render_result["media_file"] and os.path.exists(render_result["media_file"]):
+                try:
+                    vlm_result = run_vlm(render_result["media_file"], prompt)
+                except Exception as exc:
+                    vlm_result = {"status": "ERROR", "valid": False, "feedback": "", "error": str(exc)}
+            else:
+                vlm_result = {"status": "ERROR", "valid": False, "feedback": "", "error": "Rendered file missing."}
+
+            if vlm_result["status"] == "ERROR":
+                console.print(f"[yellow]⚠️ VLM Review Skipped:[/yellow] {vlm_result['error']}")
+                console.print("[bold green][✓][/bold green] Animation rendered successfully! Output saved to ./output/.")
+                console.print(f"[green]File:[/green] {render_result['media_file']}")
+                return True
+
+            if vlm_result["valid"] is False:
+                feedback = vlm_result["feedback"]
+                console.print(f"[red]❌ Visual Review Failed:[/red] {feedback}")
+                current_prompt = (
+                    f"The following Manim code was generated for the prompt: '{prompt}'\n\n"
+                    f"```python\n{cleaned_code}\n```\n\n"
+                    f"When rendering with Manim, it compiled successfully, but a visual review detected this error:\n{feedback}\n\n"
+                    f"Please analyze the error, fix the code, and output the complete corrected script inside ```python ... ```.")
+                continue
+
+            console.print("[bold green][✓][/bold green] Passed visual evaluation and animation rendered successfully! Output saved to ./output/.")
             console.print(f"[green]File:[/green] {render_result['media_file']}")
             return True
 
         console.print("[bold yellow][4/4][/bold yellow] Reflection loop triggered (if compilation fails) -> Attempting self-correction...")
         error_message = render_result["error"] or "Unknown rendering failure."
         console.print(f"[red]Render failure:[/red] {error_message}")
+
+        if "NameError: name 'ShowCreation' is not defined" in error_message:
+            error_message += (
+                "\nHint: Use `Create(qubit_state)` or `self.play(Create(qubit_state))` "
+                "instead of deprecated `ShowCreation`."
+            )
+        elif "NameError: name 'ShowCreationThenFadeOut' is not defined" in error_message:
+            error_message += (
+                "\nHint: Use `self.play(Create(qubit_state))` followed by `self.play(FadeOut(qubit_state))`."
+            )
+
         current_prompt = build_reflection_prompt(prompt, cleaned_code, error_message)
 
     console.print("[red]Reflection loop reached max retries without rendering a usable animation.[/red]")
