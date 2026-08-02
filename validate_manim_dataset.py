@@ -16,11 +16,14 @@ Usage:
     python validate_manim_dataset.py
     python validate_manim_dataset.py --timeout 90 --workers 4
     python validate_manim_dataset.py --input-jsonl /path/to/input.jsonl
+
+If Google Drive is not mounted, the script will fall back to a local input.jsonl file in the workspace.
 """
 
 import argparse
 import ast
 import json
+import os
 import re
 import subprocess
 import shutil
@@ -33,6 +36,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 CODE_BLOCK_RE = re.compile(r"```python\n(.*?)\n```", re.DOTALL)
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
 CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
+DEFAULT_VLM_MODEL = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
+VLM_STATE = {"model": None, "tokenizer": None, "process_vision_info": None, "torch": None, "error": None}
+
 
 
 def extract_code(assistant_content: str) -> str | None:
@@ -102,11 +108,123 @@ def has_required_keys(py_dict: dict) -> str | None:
     return None
 
 
+def load_vlm_if_available(model_name: str = DEFAULT_VLM_MODEL):
+    """Load the Unsloth vision-language model lazily when the optional deps exist."""
+    if VLM_STATE["model"] is not None and VLM_STATE["tokenizer"] is not None:
+        return VLM_STATE["model"], VLM_STATE["tokenizer"]
+
+    if VLM_STATE["error"] is not None:
+        return None, None
+
+    try:
+        from unsloth import FastLanguageModel
+        from qwen_vl_utils import process_vision_info
+        import torch
+    except Exception as exc:
+        VLM_STATE["error"] = str(exc)
+        return None, None
+
+    try:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            load_in_4bit=True,
+        )
+        FastLanguageModel.for_inference(model)
+        VLM_STATE["model"] = model
+        VLM_STATE["tokenizer"] = tokenizer
+        VLM_STATE["process_vision_info"] = process_vision_info
+        VLM_STATE["torch"] = torch
+        return model, tokenizer
+    except Exception as exc:
+        VLM_STATE["error"] = str(exc)
+        return None, None
+
+
+def parse_vlm_response(raw_text: str) -> dict:
+    """Parse the JSON returned by the VLM reviewer and normalize it to a dict."""
+    if not raw_text:
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": "Empty VLM response."}
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict):
+        return {
+            "status": "OK",
+            "valid": bool(payload.get("valid", False)),
+            "feedback": str(payload.get("feedback", "")),
+            "error": None,
+        }
+
+    return {"status": "ERROR", "valid": False, "feedback": "", "error": f"VLM response was not valid JSON: {raw_text}"}
+
+
+def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -> dict:
+    """Ask a vision-language model to review a rendered Manim video against the prompt."""
+    if not os.path.exists(video_path):
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Video file not found: {video_path}"}
+
+    model, tokenizer = load_vlm_if_available(model_name)
+    if model is None or tokenizer is None:
+        return {
+            "status": "ERROR",
+            "valid": False,
+            "feedback": "",
+            "error": f"VLM unavailable: {VLM_STATE['error'] or 'Install unsloth and qwen_vl_utils to enable visual review.'}",
+        }
+
+    try:
+        process_vision_info = VLM_STATE["process_vision_info"]
+        torch = VLM_STATE["torch"]
+        messages = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "video",
+                    "video": video_path,
+                    "max_pixels": 360 * 420,
+                    "fps": 1.0,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Analyze this rendered Manim animation for the prompt: '{prompt}'.\n"
+                        "Check for mathematical correctness:\n"
+                        "1. Does the object move/rotate in the correct direction?\n"
+                        "2. Is the final state accurate?\n\n"
+                        "Respond STRICTLY as JSON: {\"valid\": bool, \"feedback\": \"...\"}"
+                    ),
+                },
+            ],
+        }]
+
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = tokenizer(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = {
+            key: value.to(next(model.parameters()).device) if isinstance(value, torch.Tensor) else value
+            for key, value in inputs.items()
+        }
+        outputs = model.generate(**inputs, max_new_tokens=512, temperature=0.2)
+        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return parse_vlm_response(decoded_output)
+    except Exception as exc:
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"VLM execution failed: {exc}"}
+
+
 def render_one(index: int, code: str, class_name: str, timeout: int, workdir: Path) -> dict:
     """Write the script to a temp file and render only the final frame at
     low quality -- enough to execute every line of construct() without
     paying for full video encoding."""
-    result = {"index": index, "class_name": class_name, "ok": False, "error": None}
+    result = {"index": index, "class_name": class_name, "ok": False, "error": None, "media_file": None}
 
     # NOTE: encoding="utf-8" is required here. Without it, write_text() falls
     # back to the OS default encoding -- which is cp1252 on Windows, not
@@ -142,6 +260,11 @@ def render_one(index: int, code: str, class_name: str, timeout: int, workdir: Pa
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if proc.returncode == 0:
             result["ok"] = True
+            mp4_files = list(media_dir.glob("**/*.mp4"))
+            if mp4_files:
+                output_video_path = workdir / f"scene_{index}.mp4"
+                shutil.copy(mp4_files[0], output_video_path)
+                result["media_file"] = str(output_video_path)
         else:
             tail = "\n".join(proc.stderr.strip().splitlines()[-40:])
             result["error"] = tail or proc.stdout.strip()[-2000:]
@@ -155,7 +278,7 @@ def render_one(index: int, code: str, class_name: str, timeout: int, workdir: Pa
     return result
 
 
-def validate_row(index: int, py_dict: dict, timeout: int, workdir: Path) -> dict:
+def validate_row(index: int, py_dict: dict, timeout: int, workdir: Path, enable_vlm: bool = False, vlm_model_name: str = DEFAULT_VLM_MODEL) -> dict:
     # Top-level safety net: NO exception from anything below should ever
     # propagate out of this function. A worker process crashing on one bad
     # row would otherwise take down the entire ProcessPoolExecutor run via
@@ -179,29 +302,76 @@ def validate_row(index: int, py_dict: dict, timeout: int, workdir: Path) -> dict
         if syntax_error:
             return {"index": index, "ok": False, "error": syntax_error, "class_name": class_name}
 
-        return render_one(index, cleaned_code, class_name, timeout, workdir)
+        render_result = render_one(index, cleaned_code, class_name, timeout, workdir)
+        if not render_result["ok"]:
+            return {"index": index, "ok": False, "error": render_result["error"], "class_name": class_name}
+
+        if enable_vlm and render_result.get("media_file"):
+            prompt = py_dict.get("messages", [{}])[0].get("content", "") if py_dict.get("messages") else ""
+            vlm_result = run_vlm(render_result["media_file"], prompt, vlm_model_name)
+            if vlm_result.get("status") == "ERROR":
+                return {"index": index, "ok": False, "error": f"VLM validation failed: {vlm_result.get('error')}", "class_name": class_name}
+            if vlm_result.get("valid") is False:
+                return {"index": index, "ok": False, "error": f"VLM visual review failed: {vlm_result.get('feedback') or 'No feedback returned.'}", "class_name": class_name}
+
+        return render_result
     except Exception as e:
         return {"index": index, "ok": False, "error": f"Unexpected {type(e).__name__}: {e}", "class_name": None}
+
+
+def resolve_dataset_path(explicit_path: str | None) -> Path:
+    """Resolve the dataset path from an explicit argument or a list of common fallback locations."""
+    candidates = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+
+    drive_candidates = [
+        Path("/content/drive/MyDrive/input.jsonl"),
+        Path("/mnt/drive/MyDrive/input.jsonl"),
+        Path("C:/content/drive/MyDrive/input.jsonl"),
+        Path("C:/mnt/drive/MyDrive/input.jsonl"),
+    ]
+    candidates.extend(drive_candidates)
+
+    script_dir = Path(__file__).resolve().parent
+    workspace_candidates = [
+        script_dir / "input.jsonl",
+        Path.cwd() / "input.jsonl",
+        Path("input.jsonl"),
+    ]
+    candidates.extend(workspace_candidates)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    if explicit_path:
+        return Path(explicit_path).expanduser()
+    return (script_dir / "input.jsonl").resolve()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Validate a Manim JSONL dataset by actually rendering each row.")
     parser.add_argument(
         "--input-jsonl",
-        default="/content/drive/MyDrive/input.jsonl",
-        help="Path to the JSONL dataset file. Defaults to the Google Drive file at /content/drive/MyDrive/input.jsonl.",
+        default=None,
+        help="Path to the JSONL dataset file. If omitted, the script tries the Google Drive path first and then falls back to a local input.jsonl file.",
     )
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--outdir", default=".")
+    parser.add_argument("--enable-vlm", action="store_true", help="Run an optional Unsloth vision-language review on each rendered video.")
+    parser.add_argument("--vlm-model", default=DEFAULT_VLM_MODEL, help="Vision-language model to use for visual review.")
     args = parser.parse_args()
 
-    input_path = Path(args.input_jsonl)
+    input_path = resolve_dataset_path(args.input_jsonl)
     if not input_path.exists():
         raise FileNotFoundError(
             f"Dataset file not found at {input_path}. "
             "Make sure the file exists in your Google Drive mount or pass --input-jsonl with a different path."
         )
+
+    print(f"Using dataset file: {input_path}")
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +396,7 @@ def main():
         workdir = Path(tmp)
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(validate_row, i, row, args.timeout, workdir): i
+                executor.submit(validate_row, i, row, args.timeout, workdir, args.enable_vlm, args.vlm_model): i
                 for i, row in enumerate(rows)
             }
             for done_count, future in enumerate(as_completed(futures), 1):

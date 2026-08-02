@@ -1,6 +1,0 @@
-# This file is used internally by FFMPEG.
-file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGate/1154472725_4128775771_2988888292.mp4'
-file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGate/2949547280_548731573_2749319292.mp4'
-file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGate/2949547280_1898457206_4057183303.mp4'
-file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGate/2949547280_4098015518_3376978421.mp4'
-file 'file:C:/Users/amalf/OneDrive/Desktop/Summer Project26/manimations/media/videos/manimations/720p30/partial_movie_files/HadamardGate/2949547280_2230675760_2138861676.mp4'

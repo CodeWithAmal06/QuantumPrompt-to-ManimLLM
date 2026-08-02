@@ -1,7 +1,0 @@
-Validation report for input.jsonl
-Total rows: 100
-Passed: 100
-Failed: 0
-
-FAILURES:
-

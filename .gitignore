@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated assets and scratch work
+output/
+media/
+results/
+scratchpad/
+*.mp4
+validation_report.txt

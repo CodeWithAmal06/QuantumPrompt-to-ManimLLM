@@ -1,0 +1,5 @@
+manim>=0.20.1
+rich>=13.4.0
+unsloth>=0.0.0
+torch>=2.0.0
+qwen-vl-utils>=0.0.14
