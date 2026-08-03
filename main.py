@@ -130,6 +130,7 @@ def load_qwen_model(model_name: str = DEFAULT_MODEL_NAME) -> tuple[object, objec
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         load_in_4bit=True,
+        temperature=0.2
     )
     FastLanguageModel.for_inference(model)
     MODEL_CACHE["model"] = model
