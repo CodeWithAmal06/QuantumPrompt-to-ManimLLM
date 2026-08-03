@@ -45,13 +45,29 @@ DATASET_PATH = Path("/content/drive/MyDrive/input.jsonl")
 PROMPT_INSTRUCTIONS = (
     "Generate a runnable Manim scene in Python using Manim v0.20 syntax.\n"
     "CRITICAL REQUIREMENTS FOR QUANTUM ANIMATIONS:\n"
-    "1. Start with `from manim import *` and define exactly ONE subclass of `ThreeDScene` (or `Scene` only if purely 2D, but preferred `ThreeDScene` for Bloch sphere representations).\n"
-    "2. For 3D Bloch spheres, use `ThreeDAxes` or a sphere wireframe, call `self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)`, and draw state vectors using `Vector` or `Line` with arrows.\n"
-    "3. ANIMATE PHYSICAL VECTOR MOTION: You MUST use `Rotate(...)` or `Transform(...)` on the actual state vector to visually show it rotating across axes (e.g., from |0> along Z-axis to |+> along X-axis for a Hadamard gate).\n"
-    "4. Do NOT merely change static text labels while leaving the vector stagnant. Static or motionless vectors are STRICTLY FORBIDDEN.\n"
-    "5. Avoid deprecated calls like `ShowCreation`, `ShowCreationThenFadeOut`, or module-level `.render()` calls.\n"
-    "6. Keep text annotations away from the center of the frame so they do not block the state vector.\n"
-    "Return ONLY a single ```python ... ``` code block containing the complete executable script."
+    "1. Define exactly ONE subclass of `ThreeDScene` (NOT standard `Scene`).\n"
+    "2. Setup 3D camera and axes in `construct()`:\n"
+    "   axes = ThreeDAxes()\n"
+    "   self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)\n"
+    "3. Define a state vector (e.g., Arrow3D or Line with arrow head) starting along the Z-axis for |0>.\n"
+    "4. DYNAMIC ROTATION IS MANDATORY: You MUST visually animate the vector moving. Use `self.play(Rotate(vector, angle=..., axis=...))` or `self.play(Transform(...))` to show the gate action.\n"
+    "5. Do NOT just morph static text labels. The 3D vector MUST rotate in space.\n\n"
+    "MINIMAL WORKING PATTERN EXAMPLE:\n"
+    "```python\n"
+    "from manim import *\n\n"
+    "class QuantumScene(ThreeDScene):\n"
+    "    def construct(self):\n"
+    "        axes = ThreeDAxes()\n"
+    "        self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)\n"
+    "        sphere = Sphere(radius=2, fill_opacity=0.1)\n"
+    "        vector = Arrow3D(start=ORIGIN, end=OUT*2, color=BLUE)\n"
+    "        self.add(axes, sphere, vector)\n"
+    "        self.wait(0.5)\n"
+    "        # Rotate vector to show gate transformation\n"
+    "        self.play(Rotate(vector, angle=PI/2, axis=RIGHT, run_time=2))\n"
+    "        self.wait(1)\n"
+    "```\n"
+    "Return ONLY a single ```python ... ``` code block containing the complete script."
 )
 
 OUTPUT_DIR = Path("output")
@@ -371,11 +387,29 @@ def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
 
 
 def build_reflection_prompt(prompt: str, code: str, error: str) -> str:
+    # Auto-translate abstract VLM complaints into concrete Manim instructions
+    hints = []
+    if "Stagnant Vector Test" in error or "stationary" in error or "no rotation" in error:
+        hints.append(
+            "FIX REQUIRED: You failed to animate vector movement. "
+            "Use `self.play(Rotate(vec, angle=PI/2, axis=...))` or `self.play(Transform(vec1, vec2))` "
+            "so the vector physically rotates in space."
+        )
+    if "Dimensionality Test" in error or "Bloch sphere" in error or "3D" in error:
+        hints.append(
+            "FIX REQUIRED: Use `ThreeDScene` instead of `Scene`. "
+            "Add `ThreeDAxes()`, `Sphere(...)`, and set camera orientation using `self.set_camera_orientation(phi=75*DEGREES, theta=-45*DEGREES)`."
+        )
+
+    hint_str = "\n".join(hints) if hints else "Fix all compilation or visual errors."
+
     return (
-        "The previously generated Manim code failed visual review or compilation. "
-        "Please fix the code, ensure the vector actively rotates or transforms across coordinate axes, "
-        "and return the full corrected script inside ```python ... ```."
-        f"\n\nOriginal prompt:\n{prompt}\n\nGenerated code:\n```python\n{code}\n```\n\nError/Feedback:\n{error}"
+        "The previous code failed visual or code validation.\n"
+        f"CRITICAL REMEDIES TO APPLY:\n{hint_str}\n\n"
+        f"Original Prompt: {prompt}\n\n"
+        f"Failed Code:\n```python\n{code}\n```\n\n"
+        f"Validation Feedback:\n{error}\n\n"
+        "Provide a completely rewritten script fixing these exact issues inside ```python ... ```."
     )
 
 
