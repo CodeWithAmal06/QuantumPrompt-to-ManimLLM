@@ -130,7 +130,6 @@ def load_qwen_model(model_name: str = DEFAULT_MODEL_NAME) -> tuple[object, objec
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         load_in_4bit=True,
-        temperature=0.2
     )
     FastLanguageModel.for_inference(model)
     MODEL_CACHE["model"] = model
@@ -148,13 +147,24 @@ def serialize_token_inputs(tokens: dict) -> dict:
     return result
 
 
-def generate_manim_code(prompt: str, model_name: str = DEFAULT_MODEL_NAME) -> str:
+def generate_manim_code(prompt: str, model_name: str = DEFAULT_MODEL_NAME, attempt: int = 1) -> str:
     model, tokenizer = load_qwen_model(model_name)
     messages = [{"role": "user", "content": f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt}"}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
     inputs = serialize_token_inputs(inputs)
-    outputs = model.generate(**inputs, max_new_tokens=1024, temperature=0.2)
+    
+    # Scale temperature higher on retries (e.g. attempt 1 = 0.2, attempt 2 = 0.6, attempt 3 = 0.8)
+    # Higher temperature introduces variability so Qwen doesn't repeat the same static 2D code.
+    temperature = 0.2 if attempt == 1 else min(0.2 + (attempt - 1) * 0.3, 0.8)
+    do_sample = temperature > 0.0
+
+    outputs = model.generate(
+        **inputs, 
+        max_new_tokens=1024, 
+        temperature=temperature,
+        do_sample=do_sample
+    )
     prompt_len = inputs["input_ids"].shape[1]
     generated_tokens = outputs[0][prompt_len:]
     decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
