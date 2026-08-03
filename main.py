@@ -432,7 +432,8 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
     for attempt in range(1, max_retries + 1):
         console.print(f"[bold cyan][1/4][/bold cyan] Generating Manim code from Qwen2.5-7B... (attempt {attempt})")
         try:
-            raw_output = generate_manim_code(current_prompt, model_name=model_name)
+            # Pass the attempt parameter here!
+            raw_output = generate_manim_code(current_prompt, model_name=model_name, attempt=attempt)
         except Exception as exc:
             console.print(f"[red]Model generation failed:[/red] {exc}")
             return False
