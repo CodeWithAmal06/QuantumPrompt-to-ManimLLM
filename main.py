@@ -38,17 +38,22 @@ CODE_BLOCK_RE = re.compile(r"```python\s+(.*?)\s+```", re.DOTALL | re.IGNORECASE
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
 CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
 DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
+
+# Path for saving curated successful generations to Google Drive / local storage
+DATASET_PATH = Path("/content/drive/MyDrive/input.jsonl")
+
 PROMPT_INSTRUCTIONS = (
-    "Generate a runnable Manim scene in Python using Manim v0.20 syntax. "
-    "Start with `from manim import *` or explicit Manim imports, define exactly one Scene subclass, "
-    "and do not call `.render()` at the module level. Use `self.play(Create(...))`, `Transform(...)`, "
-    "and `FadeOut(...)`, and avoid deprecated calls like `ShowCreation` and `ShowCreationThenFadeOut`. "
-    "The animation must be pedagogical: use a visible 3D Bloch sphere or coordinate axes, clearly labeled axes, "
-    "and a vector arrow showing the qubit state. Do not produce a blank or text-only scene. "
-    "Make the viewer understand the vector motion even if they cannot yet imagine it mentally. "
-    "Show the initial state and final state labels clearly, and animate a smooth transition that teaches the concept. "
-    "Return only a single ```python ... ``` code block containing the entire script."
+    "Generate a runnable Manim scene in Python using Manim v0.20 syntax.\n"
+    "CRITICAL REQUIREMENTS FOR QUANTUM ANIMATIONS:\n"
+    "1. Start with `from manim import *` and define exactly ONE subclass of `ThreeDScene` (or `Scene` only if purely 2D, but preferred `ThreeDScene` for Bloch sphere representations).\n"
+    "2. For 3D Bloch spheres, use `ThreeDAxes` or a sphere wireframe, call `self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)`, and draw state vectors using `Vector` or `Line` with arrows.\n"
+    "3. ANIMATE PHYSICAL VECTOR MOTION: You MUST use `Rotate(...)` or `Transform(...)` on the actual state vector to visually show it rotating across axes (e.g., from |0> along Z-axis to |+> along X-axis for a Hadamard gate).\n"
+    "4. Do NOT merely change static text labels while leaving the vector stagnant. Static or motionless vectors are STRICTLY FORBIDDEN.\n"
+    "5. Avoid deprecated calls like `ShowCreation`, `ShowCreationThenFadeOut`, or module-level `.render()` calls.\n"
+    "6. Keep text annotations away from the center of the frame so they do not block the state vector.\n"
+    "Return ONLY a single ```python ... ``` code block containing the complete executable script."
 )
+
 OUTPUT_DIR = Path("output")
 MODEL_CACHE = {"model": None, "tokenizer": None}
 VLM_CACHE = {"model": None, "tokenizer": None, "process_vision_info": None}
@@ -63,6 +68,35 @@ def show_banner() -> None:
         border_style="bright_blue",
     )
     console.print(banner)
+
+
+def save_to_dataset(prompt: str, code: str, filepath: Path = DATASET_PATH) -> None:
+    """Appends successful prompt-code pairs to JSONL file with duplicate prevention."""
+    try:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        existing_prompts = set()
+
+        if filepath.exists():
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            data = json.loads(line)
+                            existing_prompts.add(data.get("prompt", "").strip())
+                        except json.JSONDecodeError:
+                            continue
+
+        if prompt.strip() in existing_prompts:
+            console.print("[dim yellow]Entry already exists in dataset. Skipping duplicate append.[/dim yellow]")
+            return
+
+        record = {"prompt": prompt.strip(), "code": code.strip()}
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        console.print(f"[bold green][+][/bold green] Saved verified code pair to dataset: {filepath}")
+
+    except Exception as exc:
+        console.print(f"[red]Failed to write to dataset path ({filepath}):[/red] {exc}")
 
 
 def load_qwen_model(model_name: str = DEFAULT_MODEL_NAME) -> tuple[object, object]:
@@ -193,13 +227,15 @@ def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -
                     "type": "text",
                     "text": (
                         f"Analyze this rendered Manim animation for the prompt: '{prompt}'.\n"
-                        "Check whether the animation is a good pedagogical illustration of the quantum operation.\n"
-                        "Specifically:\n"
-                        "1. Does the animation clearly show the initial state and the resulting state?\n"
-                        "2. Is the transformation smooth and visually understandable?\n"
-                        "3. Does the object/vectors move or rotate in the correct direction?\n"
-                        "4. Is the final quantum state correctly represented as a superposition or transformed basis state?\n\n"
-                        "Respond STRICTLY as JSON with keys: {\"valid\": bool, \"feedback\": \"...\"}."
+                        "Check whether the animation is a valid, pedagogical quantum visual.\n"
+                        "STRICT EVALUATION RULES:\n"
+                        "1. STAGNANT VECTOR TEST: Does the state vector/arrow actually ROTATE or MOVE across space? "
+                        "If the arrow remains stationary while only text labels change, set 'valid': false.\n"
+                        "2. DIMENSIONALITY TEST: For gate operations like Hadamard, Pauli-X/Y/Z, or phase shifts, "
+                        "is there a 3D Bloch sphere or coordinate system shown? If it is a flat 2D line with no dynamic rotation, set 'valid': false.\n"
+                        "3. VISIBILITY TEST: Is text overlapping and obscuring the central state vector? If text blocks the view, set 'valid': false.\n"
+                        "4. ACCURACY: Does the vector movement accurately represent the requested quantum gate transition?\n\n"
+                        "Respond STRICTLY in JSON format: {\"valid\": true/false, \"feedback\": \"detailed explanation of failure or success\"}"
                     ),
                 },
             ],
@@ -248,7 +284,7 @@ def extract_code(raw_text: str) -> str:
 def check_magic_line_classname(code: str) -> tuple[Optional[str], Optional[str]]:
     class_match = CLASS_RE.search(code)
     if not class_match:
-        return None, "No 'class Foo(Scene):' definition found in the generated code."
+        return None, "No 'class Foo(Scene):' or 'class Foo(ThreeDScene):' definition found in the generated code."
 
     actual_class_name = class_match.group(1)
     magic_match = MAGIC_LINE_RE.search(code)
@@ -266,12 +302,7 @@ def check_magic_line_classname(code: str) -> tuple[Optional[str], Optional[str]]
     return "\n".join(cleaned_lines).strip(), actual_class_name
 
 
-IMPORT_CHECK_RE = re.compile(r"^(?:from\s+manim\s+import\s+.*|import\s+manim.*)$", re.MULTILINE)
-
-
 def ensure_manim_imports(code: str) -> str:
-    # Always add a broad Manim wildcard import if no `from manim import *` is present.
-    # This prevents NameError for color constants and utility names like CYAN, LEFT, RIGHT, etc.
     if "from manim import *" in code:
         return code
     return "from manim import *\n\n" + code
@@ -341,9 +372,10 @@ def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
 
 def build_reflection_prompt(prompt: str, code: str, error: str) -> str:
     return (
-        "The previously generated Manim code failed to compile or render. "
-        "Please fix the code and return the full corrected script inside ```python ... ```." 
-        f"\n\nOriginal prompt:\n{prompt}\n\nGenerated code:\n```python\n{code}\n```\n\nError:\n{error}"
+        "The previously generated Manim code failed visual review or compilation. "
+        "Please fix the code, ensure the vector actively rotates or transforms across coordinate axes, "
+        "and return the full corrected script inside ```python ... ```."
+        f"\n\nOriginal prompt:\n{prompt}\n\nGenerated code:\n```python\n{code}\n```\n\nError/Feedback:\n{error}"
     )
 
 
@@ -395,40 +427,30 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
             if vlm_result["status"] == "ERROR":
                 feedback = vlm_result["feedback"] or vlm_result["error"]
                 console.print(f"[yellow]⚠️ VLM Review did not return a usable result:[/yellow] {feedback}")
-                current_prompt = (
-                    f"The following Manim code was generated for the prompt: '{prompt}'\n\n"
-                    f"```python\n{cleaned_code}\n```\n\n"
-                    f"When rendering with Manim, it compiled successfully, but the visual review did not return a usable result:\n{feedback}\n\n"
-                    f"Please analyze the review issue, fix the code if needed, and output the complete corrected script inside ```python ... ```.")
+                current_prompt = build_reflection_prompt(prompt, cleaned_code, feedback)
                 continue
 
             if vlm_result["valid"] is False:
                 feedback = vlm_result["feedback"]
                 console.print(f"[red]❌ Visual Review Failed:[/red] {feedback}")
-                current_prompt = (
-                    f"The following Manim code was generated for the prompt: '{prompt}'\n\n"
-                    f"```python\n{cleaned_code}\n```\n\n"
-                    f"When rendering with Manim, it compiled successfully, but a visual review detected this error:\n{feedback}\n\n"
-                    f"Please analyze the error, fix the code, and output the complete corrected script inside ```python ... ```.")
+                current_prompt = build_reflection_prompt(prompt, cleaned_code, feedback)
                 continue
 
-            console.print("[bold green][✓][/bold green] Passed visual evaluation and animation rendered successfully! Output saved to ./output/.")
+            console.print("[bold green][✓][/bold green] Passed visual evaluation and animation rendered successfully!")
             console.print(f"[green]File:[/green] {render_result['media_file']}")
+
+            # Save valid pair to drive dataset
+            save_to_dataset(prompt=prompt, code=cleaned_code)
             return True
 
-        console.print("[bold yellow][4/4][/bold yellow] Reflection loop triggered (if compilation fails) -> Attempting self-correction...")
+        console.print("[bold yellow][4/4][/bold yellow] Reflection loop triggered -> Attempting self-correction...")
         error_message = render_result["error"] or "Unknown rendering failure."
         console.print(f"[red]Render failure:[/red] {error_message}")
 
         if "NameError: name 'ShowCreation' is not defined" in error_message:
-            error_message += (
-                "\nHint: Use `Create(qubit_state)` or `self.play(Create(qubit_state))` "
-                "instead of deprecated `ShowCreation`."
-            )
+            error_message += "\nHint: Use `Create(...)` or `self.play(Create(...))` instead of deprecated `ShowCreation`."
         elif "NameError: name 'ShowCreationThenFadeOut' is not defined" in error_message:
-            error_message += (
-                "\nHint: Use `self.play(Create(qubit_state))` followed by `self.play(FadeOut(qubit_state))`."
-            )
+            error_message += "\nHint: Use `self.play(Create(...))` followed by `self.play(FadeOut(...))`."
 
         current_prompt = build_reflection_prompt(prompt, cleaned_code, error_message)
 
