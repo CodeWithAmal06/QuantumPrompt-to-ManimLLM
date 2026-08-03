@@ -41,9 +41,12 @@ DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
 PROMPT_INSTRUCTIONS = (
     "Generate a runnable Manim scene in Python using Manim v0.20 syntax. "
     "Start with `from manim import *` or explicit Manim imports, define exactly one Scene subclass, "
-    "and do not call `.render()` at the module level. Use `self.play(Create(...))`, `FadeOut(...)`, "
-    "and avoid deprecated calls like `ShowCreation` and `ShowCreationThenFadeOut`. "
-    "If you need a fade-out effect, use `self.play(FadeOut(mobject))` after `Create(...)`. "
+    "and do not call `.render()` at the module level. Use `self.play(Create(...))`, `Transform(...)`, "
+    "and `FadeOut(...)`, and avoid deprecated calls like `ShowCreation` and `ShowCreationThenFadeOut`. "
+    "The animation must be pedagogical: use a visible 3D Bloch sphere or coordinate axes, clearly labeled axes, "
+    "and a vector arrow showing the qubit state. Do not produce a blank or text-only scene. "
+    "Make the viewer understand the vector motion even if they cannot yet imagine it mentally. "
+    "Show the initial state and final state labels clearly, and animate a smooth transition that teaches the concept. "
     "Return only a single ```python ... ``` code block containing the entire script."
 )
 OUTPUT_DIR = Path("output")
@@ -128,6 +131,47 @@ def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
     return vlm_model, vlm_tokenizer
 
 
+def parse_vlm_output(output_text: str) -> dict:
+    cleaned_text = (output_text or "").strip()
+    if not cleaned_text:
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": "Empty VLM response."}
+
+    fenced_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned_text, re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        cleaned_text = fenced_match.group(1).strip()
+
+    try:
+        data = json.loads(cleaned_text)
+    except json.JSONDecodeError:
+        valid_match = re.search(r'"valid"\s*:\s*(true|false)', cleaned_text, re.IGNORECASE)
+        feedback_match = re.search(r'"feedback"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned_text)
+        if valid_match and feedback_match:
+            try:
+                feedback_value = json.loads(f'"{feedback_match.group(1)}"')
+            except Exception:
+                feedback_value = feedback_match.group(1)
+            return {
+                "status": "SUCCESS",
+                "valid": valid_match.group(1).lower() == "true",
+                "feedback": str(feedback_value),
+            }
+        return {
+            "status": "ERROR",
+            "valid": False,
+            "feedback": "",
+            "error": f"Failed to parse VLM output as JSON: {cleaned_text}",
+        }
+
+    if isinstance(data, dict) and "valid" in data:
+        return {
+            "status": "SUCCESS",
+            "valid": bool(data["valid"]),
+            "feedback": str(data.get("feedback", "")),
+        }
+
+    return {"status": "ERROR", "valid": False, "feedback": "", "error": "VLM JSON output missing 'valid' key."}
+
+
 def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -> dict:
     if not os.path.exists(video_path):
         return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Video file not found: {video_path}"}
@@ -149,10 +193,13 @@ def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -
                     "type": "text",
                     "text": (
                         f"Analyze this rendered Manim animation for the prompt: '{prompt}'.\n"
-                        "Check for mathematical correctness:\n"
-                        "1. Does the object move/rotate in the correct direction?\n"
-                        "2. Is the final state accurate?\n\n"
-                        "Respond STRICTLY as JSON: {\"valid\": bool, \"feedback\": \"...\"}"
+                        "Check whether the animation is a good pedagogical illustration of the quantum operation.\n"
+                        "Specifically:\n"
+                        "1. Does the animation clearly show the initial state and the resulting state?\n"
+                        "2. Is the transformation smooth and visually understandable?\n"
+                        "3. Does the object/vectors move or rotate in the correct direction?\n"
+                        "4. Is the final quantum state correctly represented as a superposition or transformed basis state?\n\n"
+                        "Respond STRICTLY as JSON with keys: {\"valid\": bool, \"feedback\": \"...\"}."
                     ),
                 },
             ],
@@ -179,17 +226,16 @@ def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -
         skip_special_tokens=True,
     )[0]
 
-    try:
-        data = json.loads(output_text)
-        if "valid" in data:
-            return {
-                "status": "SUCCESS",
-                "valid": bool(data["valid"]),
-                "feedback": str(data.get("feedback", "")),
-            }
-        return {"status": "ERROR", "valid": False, "feedback": "", "error": "VLM JSON output missing 'valid' key."}
-    except Exception as exc:
-        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Failed to parse VLM output as JSON: {exc}: {output_text}"}
+    parsed_output = parse_vlm_output(output_text)
+    if parsed_output["status"] == "SUCCESS":
+        return parsed_output
+
+    return {
+        "status": "ERROR",
+        "valid": False,
+        "feedback": parsed_output.get("feedback", ""),
+        "error": parsed_output.get("error", f"Failed to parse VLM output: {output_text}"),
+    }
 
 
 def extract_code(raw_text: str) -> str:
@@ -239,9 +285,18 @@ def check_syntax(code: str) -> Optional[str]:
         return f"SyntaxError: {exc.msg} (line {exc.lineno})"
 
 
+def tail_file(path: Path, lines: int = 100) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            all_lines = handle.readlines()
+        return "".join(all_lines[-lines:]).strip()
+    except Exception as exc:
+        return f"Could not read log file {path}: {exc}"
+
+
 def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
     output_root.mkdir(parents=True, exist_ok=True)
-    result = {"ok": False, "error": None, "media_file": None}
+    result = {"ok": False, "error": None, "media_file": None, "log_file": None}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         scene_path = Path(tmpdir) / "scene.py"
@@ -269,7 +324,17 @@ def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
                 result["error"] = "Manim completed without producing an MP4 artifact."
         else:
             stderr = proc.stderr.strip() or proc.stdout.strip()
-            result["error"] = stderr[-4000:]
+            error_text = stderr
+            log_match = re.search(r"log file:\s*(.+\.log)", stderr)
+            if log_match:
+                log_path = Path(log_match.group(1).strip())
+                if not log_path.is_absolute():
+                    log_path = output_root / log_path
+                if log_path.exists():
+                    result["log_file"] = str(log_path.resolve())
+                    error_text += "\n\n--- LaTeX log excerpt ---\n"
+                    error_text += tail_file(log_path, lines=80)
+            result["error"] = error_text[-4000:]
 
     return result
 
@@ -328,10 +393,14 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
                 vlm_result = {"status": "ERROR", "valid": False, "feedback": "", "error": "Rendered file missing."}
 
             if vlm_result["status"] == "ERROR":
-                console.print(f"[yellow]⚠️ VLM Review Skipped:[/yellow] {vlm_result['error']}")
-                console.print("[bold green][✓][/bold green] Animation rendered successfully! Output saved to ./output/.")
-                console.print(f"[green]File:[/green] {render_result['media_file']}")
-                return True
+                feedback = vlm_result["feedback"] or vlm_result["error"]
+                console.print(f"[yellow]⚠️ VLM Review did not return a usable result:[/yellow] {feedback}")
+                current_prompt = (
+                    f"The following Manim code was generated for the prompt: '{prompt}'\n\n"
+                    f"```python\n{cleaned_code}\n```\n\n"
+                    f"When rendering with Manim, it compiled successfully, but the visual review did not return a usable result:\n{feedback}\n\n"
+                    f"Please analyze the review issue, fix the code if needed, and output the complete corrected script inside ```python ... ```.")
+                continue
 
             if vlm_result["valid"] is False:
                 feedback = vlm_result["feedback"]
