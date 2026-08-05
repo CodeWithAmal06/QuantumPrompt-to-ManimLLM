@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Quantum-Manim-AI CLI
 
-Core command-line entry point for generating Manim animations from quantum prompts,
-validating the generated Python scene, compiling it through Manim, and retrying with
-self-correction when rendering fails.
+Streamlined pipeline without heavy prompt instructions.
+Order of operations: Syntax/Clean -> Render Scene -> VLM Visual Review -> Reflection Loop.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import ast
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,14 +19,7 @@ import json_repair
 from pathlib import Path
 from typing import Optional
 
-import torch
-from qwen_vl_utils import process_vision_info
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Prompt
-
-
-# Ensure Google Drive is mounted if running inside Google Colab
+# Mount Google Drive in Colab if needed
 if os.path.exists("/content") and not os.path.exists("/content/drive/MyDrive"):
     try:
         from google.colab import drive
@@ -36,53 +27,28 @@ if os.path.exists("/content") and not os.path.exists("/content/drive/MyDrive"):
         drive.mount("/content/drive")
     except ImportError:
         pass
+
 try:
     from IPython.display import Video, display
 except ImportError:
     Video = None
     display = None
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
+
 console = Console()
 
 CODE_BLOCK_RE = re.compile(r"```python\s+(.*?)\s+```", re.DOTALL | re.IGNORECASE)
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
 CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
+
 DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
 QWEN_WEIGHTS_PATH = Path("/content/drive/MyDrive/unsloth_outputs/final_lora_adapter")
-
-# Path for saving curated successful generations to Google Drive / local storage
 DATASET_PATH = Path("/content/drive/MyDrive/input.jsonl")
-
-PROMPT_INSTRUCTIONS = (
-    "Generate a runnable Manim scene in Python using Manim v0.20 syntax.\n"
-    "CRITICAL REQUIREMENTS FOR QUANTUM ANIMATIONS:\n"
-    "1. Define exactly ONE subclass of `ThreeDScene` (NOT standard `Scene`).\n"
-    "2. Setup 3D camera and axes in `construct()`:\n"
-    "   axes = ThreeDAxes()\n"
-    "   self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)\n"
-    "3. Define a state vector (e.g., Arrow3D or Line with arrow head) starting along the Z-axis for |0>.\n"
-    "4. Avoid deprecated calls like `ShowCreation`, `ShowCreationThenFadeOut`, or module-level `.render()` calls.\n"
-    "5. DYNAMIC ROTATION IS MANDATORY: You MUST visually animate the vector moving. Use `self.play(Rotate(vector, angle=..., axis=...))` or `self.play(Transform(...))` to show the gate action.\n"
-    "6. Do NOT just morph static text labels. The 3D vector MUST rotate in space.\n\n"
-    "MINIMAL WORKING PATTERN EXAMPLE:\n"
-    "```python\n"
-    "from manim import *\n\n"
-    "class QuantumScene(ThreeDScene):\n"
-    "    def construct(self):\n"
-    "        axes = ThreeDAxes()\n"
-    "        self.set_camera_orientation(phi=75 * DEGREES, theta=-45 * DEGREES)\n"
-    "        sphere = Sphere(radius=2, fill_opacity=0.1)\n"
-    "        vector = Arrow3D(start=ORIGIN, end=OUT*2, color=BLUE)\n"
-    "        self.add(axes, sphere, vector)\n"
-    "        self.wait(0.5)\n"
-    "        # Rotate vector to show gate transformation\n"
-    "        self.play(Rotate(vector, angle=PI/2, axis=RIGHT, run_time=2))\n"
-    "        self.wait(1)\n"
-    "```\n"
-    "Return ONLY a single ```python ... ``` code block containing the complete script."
-)
-
 OUTPUT_DIR = Path("output")
+
 MODEL_CACHE = {"model": None, "tokenizer": None}
 VLM_CACHE = {"model": None, "tokenizer": None, "process_vision_info": None}
 DEFAULT_VLM_MODEL = DEFAULT_MODEL_NAME
@@ -91,7 +57,7 @@ DEFAULT_VLM_MODEL = DEFAULT_MODEL_NAME
 def show_banner() -> None:
     banner = Panel(
         "[bold cyan]Quantum-Manim-AI[/bold cyan]\n"
-        "[white]Translate quantum computing prompts into Manim animations using a fine-tuned Qwen-2.5-7B pipeline.[/white]",
+        "[white]Generate, compile, render, and visually audit Manim scenes via Qwen-2.5-7B.[/white]",
         title="[bold green]Quantum-Manim-AI[/bold green]",
         border_style="bright_blue",
     )
@@ -99,7 +65,7 @@ def show_banner() -> None:
 
 
 def save_to_dataset(prompt: str, code: str, filepath: Path = DATASET_PATH) -> None:
-    """Appends successful prompt-code pairs to JSONL file with duplicate prevention."""
+    """Appends verified prompt-code pairs to JSONL file with duplicate prevention."""
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         existing_prompts = set()
@@ -134,9 +100,7 @@ def load_qwen_model() -> tuple[object, object]:
     try:
         from unsloth import FastLanguageModel
     except ImportError as exc:
-        raise RuntimeError(
-            "Missing dependency: install unsloth to generate Manim code from Qwen2.5."
-        ) from exc
+        raise RuntimeError("Missing dependency: install unsloth to run Qwen inference.") from exc
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=str(QWEN_WEIGHTS_PATH),
@@ -149,7 +113,6 @@ def load_qwen_model() -> tuple[object, object]:
 
 
 def serialize_token_inputs(tokens: dict, model: object) -> dict:
-    """Safely move token tensors to the model's active GPU/CPU device."""
     device = next(model.parameters()).device
     result = {}
     for key, value in tokens.items():
@@ -161,38 +124,28 @@ def serialize_token_inputs(tokens: dict, model: object) -> dict:
 
 
 def generate_manim_code(prompt_text: str, attempt: int = 1) -> str:
+    """Generates Manim Python code directly from prompt without systemic wrapping instructions."""
     model, tokenizer = load_qwen_model()
-    
-    # If it's a retry prompt (contains feedback/reflections), feed it directly as the user query.
-    # Otherwise, wrap the base user prompt in the system instructions.
-    if "The previous code failed visual or code validation." in prompt_text:
-        content = prompt_text
-    else:
-        content = f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt_text}"
 
-    messages = [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": prompt_text}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    
     inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
-    # Pass the loaded model into serialize_token_inputs
     inputs = serialize_token_inputs(inputs, model=model)
-    
-    # Increase temperature & add repetition penalty on retries to force diverse code paths
-    temperature = 0.2 if attempt == 1 else min(0.3 + (attempt - 1) * 0.3, 0.9)
-    do_sample = temperature > 0.0
+
+    temperature = 0.2 if attempt == 1 else min(0.3 + (attempt - 1) * 0.25, 0.8)
 
     outputs = model.generate(
-        **inputs, 
-        max_new_tokens=1024, 
+        **inputs,
+        max_new_tokens=1024,
         temperature=temperature,
         repetition_penalty=1.15 if attempt > 1 else 1.0,
-        do_sample=do_sample
+        do_sample=(temperature > 0.0),
     )
-    
     prompt_len = inputs["input_ids"].shape[1]
     generated_tokens = outputs[0][prompt_len:]
     decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return decoded.strip()
+
 
 def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
     if VLM_CACHE["model"] is not None and VLM_CACHE["tokenizer"] is not None:
@@ -200,6 +153,7 @@ def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
 
     try:
         from unsloth import FastVisionModel
+        from qwen_vl_utils import process_vision_info
     except ImportError as exc:
         raise RuntimeError(
             "Missing dependency: install unsloth and qwen_vl_utils to enable VLM review."
@@ -227,39 +181,26 @@ def parse_vlm_output(output_text: str) -> dict:
 
     try:
         data = json_repair.loads(cleaned_text)
-    except json.JSONDecodeError:
-        valid_match = re.search(r'"valid"\s*:\s*(true|false)', cleaned_text, re.IGNORECASE)
-        feedback_match = re.search(r'"feedback"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned_text)
-        if valid_match and feedback_match:
-            try:
-                feedback_value = json_repair.loads(f'"{feedback_match.group(1)}"')
-            except Exception:
-                feedback_value = feedback_match.group(1)
+        if isinstance(data, dict) and "valid" in data:
             return {
                 "status": "SUCCESS",
-                "valid": valid_match.group(1).lower() == "true",
-                "feedback": str(feedback_value),
+                "valid": bool(data["valid"]),
+                "feedback": str(data.get("feedback", "")),
             }
-        return {
-            "status": "ERROR",
-            "valid": False,
-            "feedback": "",
-            "error": f"Failed to parse VLM output as JSON: {cleaned_text}",
-        }
+    except Exception:
+        pass
 
-    if isinstance(data, dict) and "valid" in data:
-        return {
-            "status": "SUCCESS",
-            "valid": bool(data["valid"]),
-            "feedback": str(data.get("feedback", "")),
-        }
-
-    return {"status": "ERROR", "valid": False, "feedback": "", "error": "VLM JSON output missing 'valid' key."}
+    return {
+        "status": "ERROR",
+        "valid": False,
+        "feedback": "",
+        "error": f"Failed to parse JSON from VLM output: {output_text}",
+    }
 
 
 def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -> dict:
     if not os.path.exists(video_path):
-        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Video file not found: {video_path}"}
+        return {"status": "ERROR", "valid": False, "feedback": "", "error": f"Video file missing: {video_path}"}
 
     vlm_model, vlm_tokenizer = load_vlm_model(model_name)
     process_vision_info_fn = VLM_CACHE["process_vision_info"]
@@ -277,16 +218,9 @@ def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -
                 {
                     "type": "text",
                     "text": (
-                        f"Analyze this rendered Manim animation for the prompt: '{prompt}'.\n"
-                        "Check whether the animation is a valid, pedagogical quantum visual.\n"
-                        "STRICT EVALUATION RULES:\n"
-                        "1. STAGNANT VECTOR TEST: Does the state vector/arrow actually ROTATE or MOVE across space? "
-                        "If the arrow remains stationary while only text labels change, set 'valid': false.\n"
-                        "2. DIMENSIONALITY TEST: For gate operations like Hadamard, Pauli-X/Y/Z, or phase shifts, "
-                        "is there a 3D Bloch sphere or coordinate system shown? If it is a flat 2D line with no dynamic rotation, set 'valid': false.\n"
-                        "3. VISIBILITY TEST: Is text overlapping and obscuring the central state vector? If text blocks the view, set 'valid': false.\n"
-                        "4. ACCURACY: Does the vector movement accurately represent the requested quantum gate transition?\n\n"
-                        "Respond STRICTLY in JSON format: {\"valid\": true/false, \"feedback\": \"detailed explanation of failure or success\"}"
+                        f"Analyze this rendered Manim animation for prompt: '{prompt}'.\n"
+                        "Check if vector actually rotates, 3D coordinate frame exists, and labels are legible.\n"
+                        "Respond STRICTLY in JSON: {\"valid\": true/false, \"feedback\": \"reasoning\"}"
                     ),
                 },
             ],
@@ -313,16 +247,7 @@ def run_vlm(video_path: str, prompt: str, model_name: str = DEFAULT_VLM_MODEL) -
         skip_special_tokens=True,
     )[0]
 
-    parsed_output = parse_vlm_output(output_text)
-    if parsed_output["status"] == "SUCCESS":
-        return parsed_output
-
-    return {
-        "status": "ERROR",
-        "valid": False,
-        "feedback": parsed_output.get("feedback", ""),
-        "error": parsed_output.get("error", f"Failed to parse VLM output: {output_text}"),
-    }
+    return parse_vlm_output(output_text)
 
 
 def extract_code(raw_text: str) -> str:
@@ -332,53 +257,46 @@ def extract_code(raw_text: str) -> str:
     return raw_text.strip()
 
 
-def check_magic_line_classname(code: str) -> tuple[Optional[str], Optional[str]]:
+def sanitize_and_prepare_code(code: str) -> tuple[Optional[str], Optional[str]]:
+    """Cleans up magic lines, verifies class name, and ensures core Python/Manim imports."""
     class_match = CLASS_RE.search(code)
     if not class_match:
-        return None, "No 'class Foo(Scene):' or 'class Foo(ThreeDScene):' definition found in the generated code."
+        return None, "No valid 'class Foo(Scene):' or 'class Foo(ThreeDScene):' subclass definition found."
 
     actual_class_name = class_match.group(1)
-    magic_match = MAGIC_LINE_RE.search(code)
-    if not magic_match:
-        return code, actual_class_name
 
-    magic_class_name = magic_match.group(1)
-    if magic_class_name != actual_class_name:
-        return None, (
-            f"%%manim metadata claims class '{magic_class_name}', "
-            f"but the code defines '{actual_class_name}'."
-        )
-
+    # Remove Jupyter magic lines (%%manim) if present
     cleaned_lines = [line for line in code.splitlines() if not MAGIC_LINE_RE.match(line)]
-    return "\n".join(cleaned_lines).strip(), actual_class_name
+    clean_code = "\n".join(cleaned_lines).strip()
 
+    # Prepend essential imports to prevent standard Python missing module crashes
+    required_imports = []
+    if "from manim import *" not in clean_code:
+        required_imports.append("from manim import *")
+    if "import numpy" not in clean_code and "np." in clean_code:
+        required_imports.append("import numpy as np")
+    if "import math" not in clean_code and "math." in clean_code:
+        required_imports.append("import math")
 
-def ensure_manim_imports(code: str) -> str:
-    if "from manim import *" in code:
-        return code
-    return "from manim import *\n\n" + code
+    if required_imports:
+        clean_code = "\n".join(required_imports) + "\n\n" + clean_code
+
+    return clean_code, actual_class_name
 
 
 def check_syntax(code: str) -> Optional[str]:
+    """Fast local check for Python syntax errors before calling external processes."""
     try:
         ast.parse(code)
         return None
     except SyntaxError as exc:
-        return f"SyntaxError: {exc.msg} (line {exc.lineno})"
-
-
-def tail_file(path: Path, lines: int = 100) -> str:
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            all_lines = handle.readlines()
-        return "".join(all_lines[-lines:]).strip()
-    except Exception as exc:
-        return f"Could not read log file {path}: {exc}"
+        return f"SyntaxError on line {exc.lineno}: {exc.msg}"
 
 
 def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
+    """Executes Manim rendering via CLI and captures actual Python tracebacks upon failure."""
     output_root.mkdir(parents=True, exist_ok=True)
-    result = {"ok": False, "error": None, "media_file": None, "log_file": None}
+    result = {"ok": False, "error": None, "media_file": None}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         scene_path = Path(tmpdir) / "scene.py"
@@ -403,48 +321,22 @@ def render_manim_scene(code: str, class_name: str, output_root: Path) -> dict:
             if mp4_files:
                 result["media_file"] = str(mp4_files[0].resolve())
             else:
-                result["error"] = "Manim completed without producing an MP4 artifact."
+                result["error"] = "Manim process finished with exit code 0, but no MP4 output file was generated."
         else:
-            stderr = proc.stderr.strip() or proc.stdout.strip()
-            error_text = stderr
-            log_match = re.search(r"log file:\s*(.+\.log)", stderr)
-            if log_match:
-                log_path = Path(log_match.group(1).strip())
-                if not log_path.is_absolute():
-                    log_path = output_root / log_path
-                if log_path.exists():
-                    result["log_file"] = str(log_path.resolve())
-                    error_text += "\n\n--- LaTeX log excerpt ---\n"
-                    error_text += tail_file(log_path, lines=80)
-            result["error"] = error_text[-4000:]
+            # Extract standard Python Traceback or stderr output directly
+            raw_err = proc.stderr.strip() or proc.stdout.strip()
+            result["error"] = raw_err[-2500:]  # Send recent error trace back to reflection loop
 
     return result
 
 
-def build_reflection_prompt(prompt: str, code: str, error: str) -> str:
-    # Auto-translate abstract VLM complaints into concrete Manim instructions
-    hints = []
-    if "Stagnant Vector Test" in error or "stationary" in error or "no rotation" in error:
-        hints.append(
-            "FIX REQUIRED: You failed to animate vector movement. "
-            "Use `self.play(Rotate(vec, angle=PI/2, axis=...))` or `self.play(Transform(vec1, vec2))` "
-            "so the vector physically rotates in space."
-        )
-    if "Dimensionality Test" in error or "Bloch sphere" in error or "3D" in error:
-        hints.append(
-            "FIX REQUIRED: Use `ThreeDScene` instead of `Scene`. "
-            "Add `ThreeDAxes()`, `Sphere(...)`, and set camera orientation using `self.set_camera_orientation(phi=75*DEGREES, theta=-45*DEGREES)`."
-        )
-
-    hint_str = "\n".join(hints) if hints else "Fix all compilation or visual errors."
-
+def build_reflection_prompt(prompt: str, failed_code: str, error_msg: str) -> str:
+    """Combines original intent, failed code, and error trace into a targeted repair request."""
     return (
-        "The previous code failed visual or code validation.\n"
-        f"CRITICAL REMEDIES TO APPLY:\n{hint_str}\n\n"
-        f"Original Prompt: {prompt}\n\n"
-        f"Failed Code:\n```python\n{code}\n```\n\n"
-        f"Validation Feedback:\n{error}\n\n"
-        "Provide a completely rewritten script fixing these exact issues inside ```python ... ```."
+        f"Original Target Animation: {prompt}\n\n"
+        f"The previous attempt failed with the following error:\n{error_msg}\n\n"
+        f"Failed Code:\n```python\n{failed_code}\n```\n\n"
+        "Please fix the error and output ONLY the revised Python code block inside ```python ... ```."
     )
 
 
@@ -453,112 +345,82 @@ def process_prompt(prompt: str, max_retries: int) -> bool:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, max_retries + 1):
-        console.print(f"[bold cyan][1/4][/bold cyan] Generating Manim code from Qwen2.5-7B... (attempt {attempt})")
+        console.print(f"\n[bold cyan]Attempt {attempt}/{max_retries}[/bold cyan] Generating code...")
+
         try:
             raw_output = generate_manim_code(current_prompt, attempt=attempt)
         except Exception as exc:
-            console.print(f"[red]Model generation failed:[/red] {exc}")
+            console.print(f"[red]Generation call failed:[/red] {exc}")
             return False
 
-        console.print("[bold cyan][2/4][/bold cyan] Validating code syntax...")
-        code = extract_code(raw_output)
-        if not code:
-            console.print("[red]No Python code block was found in the model output.[/red]")
-            current_prompt = build_reflection_prompt(prompt, raw_output, "Missing ```python ... ``` block.")
+        # Step 1: Code Extraction
+        extracted_code = extract_code(raw_output)
+        if not extracted_code:
+            console.print("[red]Validation failed:[/red] Missing ```python code block.")
+            current_prompt = build_reflection_prompt(prompt, raw_output, "Your response did not include a valid ```python ... ``` code block.")
             continue
 
-        cleaned_code, class_name_or_error = check_magic_line_classname(code)
+        # Step 2: Sanitize Code & Class Name
+        cleaned_code, class_name_or_err = sanitize_and_prepare_code(extracted_code)
         if cleaned_code is None:
-            console.print(f"[red]Validation failed:[/red] {class_name_or_error}")
-            current_prompt = build_reflection_prompt(prompt, code, class_name_or_error)
+            console.print(f"[red]Validation failed:[/red] {class_name_or_err}")
+            current_prompt = build_reflection_prompt(prompt, extracted_code, class_name_or_err)
             continue
 
-        cleaned_code = ensure_manim_imports(cleaned_code)
-
+        # Step 3: Fast Syntax Verification (Local AST)
         syntax_error = check_syntax(cleaned_code)
         if syntax_error:
-            console.print(f"[red]Syntax error detected:[/red] {syntax_error}")
+            console.print(f"[red]Syntax Check Failed:[/red] {syntax_error}")
             current_prompt = build_reflection_prompt(prompt, cleaned_code, syntax_error)
             continue
 
-        console.print("[bold cyan][3/4][/bold cyan] Compiling Manim animation via system process...")
-        render_result = render_manim_scene(cleaned_code, class_name_or_error, OUTPUT_DIR)
+        console.print("[green]✓ Syntax & Imports Validated.[/green] Compiling & Rendering scene...")
 
-        if render_result["ok"] and render_result["media_file"]:
-            if render_result["media_file"] and os.path.exists(render_result["media_file"]):
-                try:
-                    vlm_result = run_vlm(render_result["media_file"], prompt)
-                except Exception as exc:
-                    vlm_result = {"status": "ERROR", "valid": False, "feedback": "", "error": str(exc)}
-            else:
-                vlm_result = {"status": "ERROR", "valid": False, "feedback": "", "error": "Rendered file missing."}
+        # Step 4: Render Video via Manim
+        render_result = render_manim_scene(cleaned_code, class_name_or_err, OUTPUT_DIR)
 
-            if vlm_result["status"] == "ERROR":
-                feedback = vlm_result["feedback"] or vlm_result["error"]
-                console.print(f"[yellow]⚠️ VLM Review did not return a usable result:[/yellow] {feedback}")
-                current_prompt = build_reflection_prompt(prompt, cleaned_code, feedback)
-                continue
+        if not render_result["ok"]:
+            console.print(f"[red]Rendering Execution Error:[/red]\n{render_result['error']}")
+            current_prompt = build_reflection_prompt(prompt, cleaned_code, render_result['error'])
+            continue
 
-            if vlm_result["valid"] is False:
-                feedback = vlm_result["feedback"]
-                console.print(f"[red]❌ Visual Review Failed:[/red] {feedback}")
-                current_prompt = build_reflection_prompt(prompt, cleaned_code, feedback)
-                continue
+        console.print("[green]✓ Video rendered successfully![/green] Passing MP4 to VLM visual evaluator...")
 
-            console.print("[bold green][✓][/bold green] Passed visual evaluation and animation rendered successfully!")
-            console.print(f"[green]File:[/green] {render_result['media_file']}")
+        # Step 5: VLM Review of Rendered Video
+        try:
+            vlm_result = run_vlm(render_result["media_file"], prompt)
+        except Exception as exc:
+            vlm_result = {"status": "ERROR", "valid": False, "feedback": str(exc)}
 
-            # Save valid pair to drive dataset
+        if vlm_result["status"] == "SUCCESS" and vlm_result["valid"]:
+            console.print("[bold green]✓ Visual evaluation passed successfully![/bold green]")
+            console.print(f"[green]Saved Output Video:[/green] {render_result['media_file']}")
             save_to_dataset(prompt=prompt, code=cleaned_code)
             return True
 
-        console.print("[bold yellow][4/4][/bold yellow] Reflection loop triggered -> Attempting self-correction...")
-        error_message = render_result["error"] or "Unknown rendering failure."
-        console.print(f"[red]Render failure:[/red] {error_message}")
+        feedback = vlm_result.get("feedback") or vlm_result.get("error", "Unknown visual check failure.")
+        console.print(f"[yellow]⚠️ VLM Visual Evaluation Failed:[/yellow] {feedback}")
+        current_prompt = build_reflection_prompt(prompt, cleaned_code, f"Visual Review Feedback: {feedback}")
 
-        if "NameError: name 'ShowCreation' is not defined" in error_message:
-            error_message += "\nHint: Use `Create(...)` or `self.play(Create(...))` instead of deprecated `ShowCreation`."
-        elif "NameError: name 'ShowCreationThenFadeOut' is not defined" in error_message:
-            error_message += "\nHint: Use `self.play(Create(...))` followed by `self.play(FadeOut(...))`."
-
-        current_prompt = build_reflection_prompt(prompt, cleaned_code, error_message)
-
-    console.print("[red]Reflection loop reached max retries without rendering a usable animation.[/red]")
+    console.print("[red]Reflection loop reached maximum retries without generating a passing scene.[/red]")
     return False
 
 
 def run_interactive(max_retries: int) -> None:
-    console.print("[bold green]Entering interactive prompt mode.[/bold green]")
-    console.print("Type [bold]exit[/bold] or [bold]quit[/bold] to stop.\n")
-
+    console.print("[bold green]Interactive Mode Active.[/bold green] Type 'exit' to quit.\n")
     while True:
         prompt_text = Prompt.ask("[cyan]Quantum animation prompt[/cyan]")
         if prompt_text.strip().lower() in {"exit", "quit"}:
-            console.print("[bold]Goodbye.[/bold]")
             break
-
         if prompt_text.strip():
             process_prompt(prompt_text, max_retries=max_retries)
-            console.print("")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Quantum-Manim-AI CLI: generate, validate, and render Manim scenes from quantum prompts."
-    )
-    parser.add_argument("-p", "--prompt", help="Quantum animation prompt to generate a Manim scene for.")
-    parser.add_argument(
-        "-i",
-        "--interactive",
-        action="store_true",
-        help="Open an interactive prompt loop for multiple generation requests.",
-    )
-    parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=3,
-        help="Maximum self-correction attempts when rendering fails.",
-    )
+    parser = argparse.ArgumentParser(description="Quantum-Manim-AI Pipeline")
+    parser.add_argument("-p", "--prompt", help="Quantum prompt to generate.")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Interactive terminal mode.")
+    parser.add_argument("--max-retries", type=int, default=3, help="Max self-correction loops.")
     return parser.parse_args()
 
 
@@ -567,13 +429,8 @@ def main() -> None:
     show_banner()
 
     if not args.prompt and not args.interactive:
-        console.print("[yellow]Use --prompt or --interactive to start the pipeline.[/yellow]\n")
-        console.print("Run with -h for usage examples.")
+        console.print("[yellow]Provide --prompt or --interactive to begin.[/yellow]")
         sys.exit(0)
-
-    if args.prompt and args.interactive:
-        console.print("[red]Error:[/red] Cannot use --prompt and --interactive at the same time.")
-        sys.exit(1)
 
     if args.prompt:
         success = process_prompt(args.prompt, args.max_retries)
