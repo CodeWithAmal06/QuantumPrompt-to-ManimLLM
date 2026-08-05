@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json_repair
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +39,7 @@ CODE_BLOCK_RE = re.compile(r"```python\s+(.*?)\s+```", re.DOTALL | re.IGNORECASE
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
 CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
 DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
+QWEN_WEIGHTS_PATH = Path("/content/drive/MyDrive/unsloth_outputs/final_lora_adapter")
 
 # Path for saving curated successful generations to Google Drive / local storage
 DATASET_PATH = Path("/content/drive/MyDrive/input.jsonl")
@@ -116,7 +118,7 @@ def save_to_dataset(prompt: str, code: str, filepath: Path = DATASET_PATH) -> No
         console.print(f"[red]Failed to write to dataset path ({filepath}):[/red] {exc}")
 
 
-def load_qwen_model(model_name: str = DEFAULT_MODEL_NAME) -> tuple[object, object]:
+def load_qwen_model() -> tuple[object, object]:
     if MODEL_CACHE["model"] is not None and MODEL_CACHE["tokenizer"] is not None:
         return MODEL_CACHE["model"], MODEL_CACHE["tokenizer"]
 
@@ -128,7 +130,7 @@ def load_qwen_model(model_name: str = DEFAULT_MODEL_NAME) -> tuple[object, objec
         ) from exc
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
+        model_name=str(QWEN_WEIGHTS_PATH),
         load_in_4bit=True,
     )
     FastLanguageModel.for_inference(model)
@@ -147,8 +149,8 @@ def serialize_token_inputs(tokens: dict) -> dict:
     return result
 
 
-def generate_manim_code(prompt: str, model_name: str = DEFAULT_MODEL_NAME, attempt: int = 1) -> str:
-    model, tokenizer = load_qwen_model(model_name)
+def generate_manim_code(prompt: str, attempt: int = 1) -> str:
+    model, tokenizer = load_qwen_model()
     messages = [{"role": "user", "content": f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt}"}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
@@ -203,13 +205,13 @@ def parse_vlm_output(output_text: str) -> dict:
         cleaned_text = fenced_match.group(1).strip()
 
     try:
-        data = json.loads(cleaned_text)
+        data = json_repair.loads(cleaned_text)
     except json.JSONDecodeError:
         valid_match = re.search(r'"valid"\s*:\s*(true|false)', cleaned_text, re.IGNORECASE)
         feedback_match = re.search(r'"feedback"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned_text)
         if valid_match and feedback_match:
             try:
-                feedback_value = json.loads(f'"{feedback_match.group(1)}"')
+                feedback_value = json_repair.loads(f'"{feedback_match.group(1)}"')
             except Exception:
                 feedback_value = feedback_match.group(1)
             return {
@@ -425,15 +427,14 @@ def build_reflection_prompt(prompt: str, code: str, error: str) -> str:
     )
 
 
-def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
+def process_prompt(prompt: str, max_retries: int) -> bool:
     current_prompt = prompt
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, max_retries + 1):
         console.print(f"[bold cyan][1/4][/bold cyan] Generating Manim code from Qwen2.5-7B... (attempt {attempt})")
         try:
-            # Pass the attempt parameter here!
-            raw_output = generate_manim_code(current_prompt, model_name=model_name, attempt=attempt)
+            raw_output = generate_manim_code(current_prompt, attempt=attempt)
         except Exception as exc:
             console.print(f"[red]Model generation failed:[/red] {exc}")
             return False
@@ -505,7 +506,7 @@ def process_prompt(prompt: str, max_retries: int, model_name: str) -> bool:
     return False
 
 
-def run_interactive(max_retries: int, model_name: str) -> None:
+def run_interactive(max_retries: int) -> None:
     console.print("[bold green]Entering interactive prompt mode.[/bold green]")
     console.print("Type [bold]exit[/bold] or [bold]quit[/bold] to stop.\n")
 
@@ -516,7 +517,7 @@ def run_interactive(max_retries: int, model_name: str) -> None:
             break
 
         if prompt_text.strip():
-            process_prompt(prompt_text, max_retries=max_retries, model_name=model_name)
+            process_prompt(prompt_text, max_retries=max_retries)
             console.print("")
 
 
@@ -537,11 +538,6 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Maximum self-correction attempts when rendering fails.",
     )
-    parser.add_argument(
-        "--model-name",
-        default=DEFAULT_MODEL_NAME,
-        help="Fine-tuned Qwen model name or path to use for generation.",
-    )
     return parser.parse_args()
 
 
@@ -559,10 +555,10 @@ def main() -> None:
         sys.exit(1)
 
     if args.prompt:
-        success = process_prompt(args.prompt, args.max_retries, args.model_name)
+        success = process_prompt(args.prompt, args.max_retries)
         sys.exit(0 if success else 1)
 
-    run_interactive(args.max_retries, args.model_name)
+    run_interactive(args.max_retries)
 
 
 if __name__ == "__main__":
