@@ -148,39 +148,51 @@ def load_qwen_model() -> tuple[object, object]:
     return model, tokenizer
 
 
-def serialize_token_inputs(tokens: dict) -> dict:
+def serialize_token_inputs(tokens: dict, model: object) -> dict:
+    """Safely move token tensors to the model's active GPU/CPU device."""
+    device = next(model.parameters()).device
     result = {}
     for key, value in tokens.items():
         if hasattr(value, "to"):
-            result[key] = value.to(next(MODEL_CACHE["model"].parameters()).device)
+            result[key] = value.to(device)
         else:
             result[key] = value
     return result
 
 
-def generate_manim_code(prompt: str, attempt: int = 1) -> str:
+def generate_manim_code(prompt_text: str, attempt: int = 1) -> str:
     model, tokenizer = load_qwen_model()
-    messages = [{"role": "user", "content": f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt}"}]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
-    inputs = serialize_token_inputs(inputs)
     
-    # Scale temperature higher on retries (e.g. attempt 1 = 0.2, attempt 2 = 0.6, attempt 3 = 0.8)
-    # Higher temperature introduces variability so Qwen doesn't repeat the same static 2D code.
-    temperature = 0.2 if attempt == 1 else min(0.2 + (attempt - 1) * 0.3, 0.8)
+    # If it's a retry prompt (contains feedback/reflections), feed it directly as the user query.
+    # Otherwise, wrap the base user prompt in the system instructions.
+    if "The previous code failed visual or code validation." in prompt_text:
+        content = prompt_text
+    else:
+        content = f"{PROMPT_INSTRUCTIONS}\n\nPrompt:\n{prompt_text}"
+
+    messages = [{"role": "user", "content": content}]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
+    # Pass the loaded model into serialize_token_inputs
+    inputs = serialize_token_inputs(inputs, model=model)
+    
+    # Increase temperature & add repetition penalty on retries to force diverse code paths
+    temperature = 0.2 if attempt == 1 else min(0.3 + (attempt - 1) * 0.3, 0.9)
     do_sample = temperature > 0.0
 
     outputs = model.generate(
         **inputs, 
         max_new_tokens=1024, 
         temperature=temperature,
+        repetition_penalty=1.15 if attempt > 1 else 1.0,
         do_sample=do_sample
     )
+    
     prompt_len = inputs["input_ids"].shape[1]
     generated_tokens = outputs[0][prompt_len:]
     decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return decoded.strip()
-
 
 def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
     if VLM_CACHE["model"] is not None and VLM_CACHE["tokenizer"] is not None:
