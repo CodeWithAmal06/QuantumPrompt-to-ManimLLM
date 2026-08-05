@@ -27,6 +27,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+
+# Ensure Google Drive is mounted if running inside Google Colab
+if os.path.exists("/content") and not os.path.exists("/content/drive/MyDrive"):
+    try:
+        from google.colab import drive
+        print("Mounting Google Drive...")
+        drive.mount("/content/drive")
+    except ImportError:
+        pass
 try:
     from IPython.display import Video, display
 except ImportError:
