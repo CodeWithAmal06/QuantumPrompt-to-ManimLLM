@@ -42,8 +42,7 @@ console = Console()
 
 CODE_BLOCK_RE = re.compile(r"```python\s+(.*?)\s+```", re.DOTALL | re.IGNORECASE)
 MAGIC_LINE_RE = re.compile(r"^%%manim\s+(?:-\S+\s+)*(\S+)\s*$", re.MULTILINE)
-CLASS_RE = re.compile(r"class\s+(\w+)\s*\(")
-
+CLASS_RE = re.compile(r"class\s+([A-Za-z_]\w*)\s*(?:\([^)]*\))?:")
 DEFAULT_MODEL_NAME = "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit"
 QWEN_WEIGHTS_PATH = Path("/content/drive/MyDrive/unsloth_outputs/final_lora_adapter")
 DATASET_PATH = Path("/content/drive/MyDrive/input.jsonl")
@@ -123,11 +122,21 @@ def serialize_token_inputs(tokens: dict, model: object) -> dict:
     return result
 
 
+MINIMAL_SYSTEM_PREFIX = (
+    "Write a complete, runnable Manim Python script inside a single ```python ``` code block. "
+    "Do not include explanation outside the block."
+)
+
 def generate_manim_code(prompt_text: str, attempt: int = 1) -> str:
-    """Generates Manim Python code directly from prompt without systemic wrapping instructions."""
     model, tokenizer = load_qwen_model()
 
-    messages = [{"role": "user", "content": prompt_text}]
+    # If it's a reflection retry, pass the prompt directly. Otherwise, add minimal instruction.
+    if "Failed Code:" in prompt_text:
+        content = prompt_text
+    else:
+        content = f"{MINIMAL_SYSTEM_PREFIX}\n\nTask:\n{prompt_text}"
+
+    messages = [{"role": "user", "content": content}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text=[text], return_tensors="pt", padding=True)
     inputs = serialize_token_inputs(inputs, model=model)
@@ -145,7 +154,6 @@ def generate_manim_code(prompt_text: str, attempt: int = 1) -> str:
     generated_tokens = outputs[0][prompt_len:]
     decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return decoded.strip()
-
 
 def load_vlm_model(model_name: str = DEFAULT_VLM_MODEL):
     if VLM_CACHE["model"] is not None and VLM_CACHE["tokenizer"] is not None:
@@ -257,19 +265,19 @@ def extract_code(raw_text: str) -> str:
     return raw_text.strip()
 
 
+
+
 def sanitize_and_prepare_code(code: str) -> tuple[Optional[str], Optional[str]]:
-    """Cleans up magic lines, verifies class name, and ensures core Python/Manim imports."""
     class_match = CLASS_RE.search(code)
     if not class_match:
-        return None, "No valid 'class Foo(Scene):' or 'class Foo(ThreeDScene):' subclass definition found."
+        return None, "No valid Python class definition (e.g. 'class MyAnimation(ThreeDScene):') was found in the output."
 
-    actual_class_name = class_match.group(1)
+    actual_class_name = class_match.group(1) # Extracts 'HadamardAnimation', 'QuantumGate', etc.
 
-    # Remove Jupyter magic lines (%%manim) if present
     cleaned_lines = [line for line in code.splitlines() if not MAGIC_LINE_RE.match(line)]
     clean_code = "\n".join(cleaned_lines).strip()
 
-    # Prepend essential imports to prevent standard Python missing module crashes
+    # Prepend basic imports
     required_imports = []
     if "from manim import *" not in clean_code:
         required_imports.append("from manim import *")
@@ -282,7 +290,6 @@ def sanitize_and_prepare_code(code: str) -> tuple[Optional[str], Optional[str]]:
         clean_code = "\n".join(required_imports) + "\n\n" + clean_code
 
     return clean_code, actual_class_name
-
 
 def check_syntax(code: str) -> Optional[str]:
     """Fast local check for Python syntax errors before calling external processes."""
