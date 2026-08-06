@@ -97,6 +97,9 @@ Use a custom fine-tuned model reference:
 python main.py --prompt "Animate a quantum entanglement circuit." --model-name unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit
 ```
 
+### (Recommended):
+If Nvidia GPU is not present on the system environment, then set up collab on vs code and connect with its remote kernel to run "run_main.ipynb" notebook.
+
 ## Fine-Tuning Details
 
 The fine-tuning notebook `qwen2.5_7B_alpaca.ipynb` contains the training recipe used to adapt Qwen-2.5-7B to quantum mechanics and Manim code generation. Training data is validated with `Validate_manim_dataset.py`, which checks that each generated JSONL entry contains valid Python, matches the declared `%%manim` class name, and renders without syntax errors.
